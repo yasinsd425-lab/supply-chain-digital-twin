@@ -72,41 +72,43 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
 
     # Controls
     col1, col2, col3 = st.columns(3)
-    num_vehicles = col1.slider("Number of Vehicles", 1, 5, 3)
-    num_locations = col2.slider("Number of Deliveries", 5, 20, 10)
-    depot_city = col3.selectbox("Depot Location", ["Rome", "Milan", "Naples"])
+    num_vehicles = col1.slider("Number of Vehicles", 2, 5, 3) # Min 2 vehicles
+    num_locations = col2.slider("Number of Deliveries", 5, 50, 15)
+    depot_city = col3.selectbox("Depot Location", ["Rome", "Milan", "Naples", "Turin"])
 
-    coords = {"Rome": (41.9028, 12.4964), "Milan": (45.4642, 9.1900), "Naples": (40.8518, 14.2681)}
+    coords = {
+        "Rome": (41.9028, 12.4964), 
+        "Milan": (45.4642, 9.1900), 
+        "Naples": (40.8518, 14.2681),
+        "Turin": (45.0703, 7.6869)
+    }
     depot_lat, depot_lon = coords[depot_city]
 
-    # Initialize Session State
-    if 'optimization_run' not in st.session_state:
-        st.session_state.optimization_run = False
+    # Initialize Session State for Results (This keeps map stable after refresh)
+    if 'vrp_map_data' not in st.session_state:
+        st.session_state.vrp_map_data = None
 
-    if st.button("🚀 Run AI Optimization"):
-        st.session_state.optimization_run = True
-
-    # Run Logic if State is True
-    if st.session_state.optimization_run:
-        locations = [{'id': 0, 'lat': depot_lat, 'lon': depot_lon, 'name': 'Depot'}]
-        # Use a fixed seed so points don't jump around on refresh
-        random.seed(42) 
+    # TRIGGER BUTTON
+    if st.button("🚀 Generate New Scenario & Solve"):
         
+        # 1. Generate FRESH Random Data (No fixed seed)
+        locations = [{'id': 0, 'lat': depot_lat, 'lon': depot_lon, 'name': 'Depot'}]
         for i in range(num_locations):
-            lat = depot_lat + random.uniform(-1, 1)
-            lon = depot_lon + random.uniform(-1, 1)
+            # Reduced radius to ~15km (City Scale) to avoid sea
+            lat = depot_lat + random.uniform(-0.15, 0.15) 
+            lon = depot_lon + random.uniform(-0.15, 0.15)
             locations.append({'id': i+1, 'lat': lat, 'lon': lon, 'name': f'Customer {i+1}'})
         
-        # Create Distance Matrix
+        # 2. Create Distance Matrix
         dist_matrix = {}
         for i in range(len(locations)):
             dist_matrix[i] = {}
             for j in range(len(locations)):
                 dist = haversine(locations[i]['lon'], locations[i]['lat'], 
                                  locations[j]['lon'], locations[j]['lat'])
-                dist_matrix[i][j] = int(dist * 1000)
+                dist_matrix[i][j] = int(dist * 1000) # Meters
 
-        # OR-Tools Setup
+        # 3. OR-Tools Setup
         manager = pywrapcp.RoutingIndexManager(len(locations), num_vehicles, 0)
         routing = pywrapcp.RoutingModel(manager)
 
@@ -118,45 +120,100 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
         transit_callback_index = routing.RegisterTransitCallback(distance_callback)
         routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-        # Solve
+        # --- FORCE LOAD BALANCING (Add Distance Dimension) ---
+        # This forces the solver to use multiple vehicles by limiting max distance per truck
+        dimension_name = 'Distance'
+        routing.AddDimension(
+            transit_callback_index,
+            0,  # no slack
+            200000,  # max distance per vehicle (200km) - Forces split
+            True,  # start cumul to zero
+            dimension_name)
+        distance_dimension = routing.GetDimensionOrDie(dimension_name)
+        distance_dimension.SetGlobalSpanCostCoefficient(100) # Try to balance distances
+
+        # 4. Solve
         search_parameters = pywrapcp.DefaultRoutingSearchParameters()
         search_parameters.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
         
         solution = routing.SolveWithParameters(search_parameters)
 
         if solution:
-            st.markdown("### 🗺️ Optimized Routes")
-            m2 = folium.Map(location=[depot_lat, depot_lon], zoom_start=8)
-            
-            colors = ['blue', 'green', 'orange', 'purple', 'red']
+            # Prepare data for plotting (Store in Session State)
+            routes_data = []
+            colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231'] # Distinct colors
             
             for vehicle_id in range(num_vehicles):
                 index = routing.Start(vehicle_id)
                 route_coords = []
-                route_text = f"<b>Vehicle {vehicle_id+1}:</b> Depot"
+                route_names = []
+                total_dist = 0
                 
                 while not routing.IsEnd(index):
                     node_index = manager.IndexToNode(index)
                     lat, lon = locations[node_index]['lat'], locations[node_index]['lon']
                     route_coords.append((lat, lon))
-                    
-                    if node_index != 0: route_text += f" ➝ Customer {node_index}"
+                    route_names.append(locations[node_index]['name'])
                     
                     previous_index = index
                     index = solution.Value(routing.NextVar(index))
-                    
-                    if node_index == 0:
-                        folium.Marker([lat, lon], popup="DEPOT", icon=folium.Icon(color='black', icon='home')).add_to(m2)
-                    else:
-                        folium.CircleMarker([lat, lon], radius=5, color=colors[vehicle_id%5], fill=True).add_to(m2)
+                    # Calculate segment distance
+                    if not routing.IsEnd(index): 
+                         total_dist += dist_matrix[node_index][manager.IndexToNode(index)]
 
+                # Add return to depot
                 node_index = manager.IndexToNode(index)
                 route_coords.append((locations[node_index]['lat'], locations[node_index]['lon']))
-                route_text += " ➝ Depot"
+                route_names.append("Back to Depot")
                 
-                folium.PolyLine(route_coords, color=colors[vehicle_id%5], weight=3, opacity=0.8, tooltip=f"Vehicle {vehicle_id+1}").add_to(m2)
-                st.caption(route_text)
+                if len(route_coords) > 2: # Only save if vehicle actually moved
+                    routes_data.append({
+                        "vehicle_id": vehicle_id + 1,
+                        "color": colors[vehicle_id % len(colors)],
+                        "coords": route_coords,
+                        "names": route_names,
+                        "distance_km": total_dist / 1000
+                    })
 
-            st_folium(m2, width=800, height=500)
+            st.session_state.vrp_map_data = {"center": [depot_lat, depot_lon], "routes": routes_data, "locations": locations}
         else:
-            st.error("No solution found!")
+            st.error("Could not find a solution. Try reducing constraints.")
+
+    # RENDER MAP (From Session State)
+    if st.session_state.vrp_map_data:
+        data = st.session_state.vrp_map_data
+        m2 = folium.Map(location=data["center"], zoom_start=11) # Zoom closer
+        
+        # Plot Routes
+        for route in data["routes"]:
+            # Draw Line
+            folium.PolyLine(
+                route["coords"], 
+                color=route["color"], 
+                weight=5, 
+                opacity=0.7, 
+                tooltip=f"Vehicle {route['vehicle_id']} ({route['distance_km']:.1f} km)"
+            ).add_to(m2)
+            
+            # Draw Markers (Only Customers)
+            for i, (lat, lon) in enumerate(route["coords"][:-1]): # Skip last duplicate depot
+                name = route["names"][i]
+                if "Depot" in name:
+                    folium.Marker([lat, lon], popup="DEPOT", icon=folium.Icon(color='black', icon='home')).add_to(m2)
+                else:
+                    folium.CircleMarker(
+                        [lat, lon], 
+                        radius=6, 
+                        color=route["color"], 
+                        fill=True, 
+                        fill_opacity=1,
+                        tooltip=f"{name} (Truck {route['vehicle_id']})" # Proper Tooltip
+                    ).add_to(m2)
+
+        st_folium(m2, width=800, height=500, key="vrp_map_render") # Add key to prevent rerender loop
+        
+        # Show Stats
+        st.markdown("### 📊 Route Analytics")
+        cols = st.columns(len(data["routes"]))
+        for i, route in enumerate(data["routes"]):
+            cols[i].metric(f"Vehicle {route['vehicle_id']}", f"{route['distance_km']:.1f} km", delta_color="off")
