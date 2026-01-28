@@ -46,7 +46,7 @@ if mode == "📊 Network Monitoring (Digital Twin)":
     # Metrics
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Nodes", len(df))
-    col2.metric("Critical Alerts", df[df['Status']=='Critical'].count())
+    col2.metric("Critical Alerts", len(df[df['Status']=='Critical']))
     col3.metric("Total Inventory", f"{df['Inventory'].sum():,}")
 
     # Map
