@@ -10,7 +10,7 @@ from ortools.constraint_solver import pywrapcp
 import datetime
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Supply Chain Control Tower V6.0", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="Supply Chain Control Tower V7.0", page_icon="🌍", layout="wide")
 
 st.title("🌍 Supply Chain Digital Twin & AI Optimizer")
 st.markdown("### Industrial Engineering Portfolio | Unicas")
@@ -60,10 +60,10 @@ if mode == "📊 Network Monitoring (Digital Twin)":
         ).add_to(m)
     st_folium(m, width=1000, height=500)
 
-# --- MODE 2: AI ROUTE OPTIMIZER (VRP PRO + REAL TIME TRAFFIC) ---
+# --- MODE 2: AI ROUTE OPTIMIZER (VRP COMPLETE) ---
 elif mode == "🚚 AI Route Optimizer (VRP)":
     st.success("🤖 Optimization Engine: Google OR-Tools")
-    st.markdown("Solve VRP with **Dynamic Traffic Simulation** & **Load Balancing**.")
+    st.markdown("Solve VRP with **Dynamic Traffic, Load Balancing & Detailed Logistics**.")
 
     # Controls
     col1, col2, col3, col4 = st.columns(4)
@@ -88,8 +88,8 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
     selected_zone = city_zones[depot_city]
     depot_lat, depot_lon = selected_zone['center']
 
-    if 'vrp_data_v6' not in st.session_state:
-        st.session_state.vrp_data_v6 = None
+    if 'vrp_data_v7' not in st.session_state:
+        st.session_state.vrp_data_v7 = None
 
     # --- BUTTON: GENERATE & SOLVE ---
     if st.button("🚀 Generate Scenario & Optimize"):
@@ -121,7 +121,7 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
         transit_callback_index = routing.RegisterTransitCallback(distance_callback)
         routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
         
-        # --- FIX: FORCE LOAD BALANCING ---
+        # FORCE LOAD BALANCING
         dimension_name = 'Distance'
         routing.AddDimension(
             transit_callback_index,
@@ -130,7 +130,6 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
             True,  # start cumul to zero
             dimension_name)
         distance_dimension = routing.GetDimensionOrDie(dimension_name)
-        # This coefficient forces the solver to minimize the difference between the longest and shortest route
         distance_dimension.SetGlobalSpanCostCoefficient(100) 
 
         # 4. SOLVE
@@ -164,9 +163,7 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
                         "dist_m": dist_m
                     })
                 
-                # Only add route if it has destinations (not just depot to depot)
                 if len(route_legs) > 0:
-                    # Check if actually moved (sometimes it just stays at depot)
                     total_dist = sum([leg['dist_m'] for leg in route_legs])
                     if total_dist > 0:
                         raw_routes.append({
@@ -175,24 +172,30 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
                             "legs": route_legs
                         })
             
-            st.session_state.vrp_data_v6 = {"center": [depot_lat, depot_lon], "raw_routes": raw_routes}
+            st.session_state.vrp_data_v7 = {"center": [depot_lat, depot_lon], "raw_routes": raw_routes}
         else:
             st.error("Optimization Failed. Try again.")
 
-    # --- DYNAMIC RENDERER ---
-    if st.session_state.vrp_data_v6:
-        data = st.session_state.vrp_data_v6
+    # --- DYNAMIC RENDERER & TABLE GENERATOR ---
+    if st.session_state.vrp_data_v7:
+        data = st.session_state.vrp_data_v7
         m2 = folium.Map(location=data["center"], zoom_start=11)
         
         total_fleet_km = 0
         total_fleet_hours = 0
         
+        # Store detailed itinerary for the table below
+        fleet_itinerary = []
+
         current_time_base = datetime.datetime.now().replace(hour=8, minute=0, second=0)
         
         for route in data["raw_routes"]:
             vehicle_time = current_time_base
             route_coords = [[data["center"][0], data["center"][1]]] 
             route_km = 0
+            
+            # For the Table
+            truck_schedule = []
             
             for leg in route["legs"]:
                 # Dynamic Time Calculation
@@ -205,7 +208,15 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
                 route_coords.append(leg["end_coords"])
                 route_km += leg["dist_m"] / 1000
                 
-                # DYNAMIC MARKER & POPUP
+                # Append to Schedule List
+                if "Depot" not in leg["end_name"]:
+                    truck_schedule.append({
+                        "Stop": leg["end_name"],
+                        "ETA": eta_str,
+                        "Distance (km)": f"{leg['dist_m']/1000:.1f}"
+                    })
+
+                # MAP MARKER
                 if "Depot" not in leg["end_name"]:
                     popup_html = f"""
                     <div style='font-family: sans-serif; width: 150px;'>
@@ -215,7 +226,6 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
                         📏 Dist: {leg['dist_m']/1000:.1f} km
                     </div>
                     """
-                    
                     folium.CircleMarker(
                         leg["end_coords"],
                         radius=7,
@@ -226,32 +236,43 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
                         tooltip=f"{leg['end_name']} (ETA: {eta_str})"
                     ).add_to(m2)
             
-            # 1. STATIC LINE (Background)
+            # Static & Animated Lines
             folium.PolyLine(route_coords, color=route["color"], weight=4, opacity=0.5).add_to(m2)
-            
-            # 2. ANIMATED ANTPATH (Foreground - Direction)
-            plugins.AntPath(
-                locations=route_coords, 
-                color=route["color"], 
-                weight=4, 
-                delay=800, # Speed of animation
-                dash_array=[10, 20],
-                pulse_color='white',
-                opacity=1
-            ).add_to(m2)
+            plugins.AntPath(route_coords, color=route["color"], weight=4, delay=800, dash_array=[10, 20], pulse_color='white', opacity=1).add_to(m2)
             
             total_fleet_km += route_km
-            total_fleet_hours += (vehicle_time - current_time_base).total_seconds() / 3600
+            hours = (vehicle_time - current_time_base).total_seconds() / 3600
+            total_fleet_hours += hours
+            
+            # Save data for the table display
+            fleet_itinerary.append({
+                "id": route["vehicle_id"],
+                "color": route["color"],
+                "total_km": route_km,
+                "total_time": hours,
+                "stops": truck_schedule
+            })
 
         # Depot Marker
         folium.Marker(data["center"], popup="DEPOT (Start 08:00)", icon=folium.Icon(color='black', icon='home')).add_to(m2)
 
         st_folium(m2, width=1000, height=600)
 
-        # KPIs
-        st.markdown("### 🚦 Live Operations Metrics")
+        # --- KPIs SECTION ---
+        st.markdown("### 🚦 Operational Metrics")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Effective Speed", f"{effective_speed:.1f} km/h", delta=f"-{traffic_intensity}% Traffic", delta_color="inverse")
-        k2.metric("Total Distance", f"{total_fleet_km:.1f} km")
+        k2.metric("Total Fleet Dist.", f"{total_fleet_km:.1f} km")
         k3.metric("Fleet Working Hours", f"{total_fleet_hours:.1f} hrs")
-        k4.metric("Active Trucks", len(data["raw_routes"]))
+        # Fuel Cost Calculation: Approx €1.5 per liter, Truck consumes ~30L/100km -> €0.45 per km
+        k4.metric("Est. Fuel Cost", f"€ {total_fleet_km * 0.45:.2f}")
+
+        # --- DETAILED ITINERARY TABLES ---
+        st.markdown("### 📋 Detailed Driver Itineraries")
+        for truck in fleet_itinerary:
+            # Create a styled expander
+            with st.expander(f"🚛 Truck {truck['id']} | Distance: {truck['total_km']:.1f} km | Time: {truck['total_time']:.1f} hrs", expanded=False):
+                if truck["stops"]:
+                    st.dataframe(pd.DataFrame(truck["stops"]), use_container_width=True)
+                else:
+                    st.warning("No stops assigned to this vehicle.")
