@@ -189,7 +189,7 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
     # RENDER MAP
     if st.session_state.vrp_data_v4:
         data = st.session_state.vrp_data_v4
-        m2 = folium.Map(location=data["center"], zoom_start=11, tiles="cartodbpositron") # Clean map style
+        m2 = folium.Map(location=data["center"], zoom_start=11) # Clean map style
         
         total_km_fleet = 0
         
