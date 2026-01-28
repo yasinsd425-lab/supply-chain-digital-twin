@@ -60,60 +60,59 @@ if mode == "📊 Network Monitoring (Digital Twin)":
         ).add_to(m)
     st_folium(m, width=1000, height=500)
 
-# --- MODE 2: AI ROUTE OPTIMIZER (VRP PRO) ---
+# --- MODE 2: AI ROUTE OPTIMIZER (VRP PRO + REAL TIME TRAFFIC) ---
 elif mode == "🚚 AI Route Optimizer (VRP)":
     st.success("🤖 Optimization Engine: Google OR-Tools")
-    st.markdown("Solve the **Vehicle Routing Problem (VRP)** with Time Estimation & Directional Flows.")
+    st.markdown("Solve VRP with **Dynamic Traffic Simulation**.")
 
     # Controls
     col1, col2, col3, col4 = st.columns(4)
     num_vehicles = col1.slider("🚚 Vehicles", 2, 5, 3)
-    num_locations = col2.slider("📍 Stops", 5, 30, 12)
-    avg_speed = col3.number_input("⚡ Avg Speed (km/h)", value=40)
+    num_locations = col2.slider("📍 Stops", 5, 30, 15)
+    # Speed is now used for dynamic calculation, not just initial solve
+    base_speed = col3.number_input("⚡ Max Speed (km/h)", value=60) 
     depot_city = col4.selectbox("🏢 Depot City", ["Milan (Inland)", "Naples (Coastal)", "Rome (Central)"])
 
-    # SAFE ZONES (BOUNDING BOXES) TO AVOID WATER
-    # Format: [Min Lat, Max Lat, Min Lon, Max Lon]
+    # Traffic Simulation Slider
+    traffic_intensity = st.slider("🚦 Traffic Intensity (Slows down operations)", 0, 100, 20, format="%d%%")
+    
+    # Calculate Effective Speed based on Traffic
+    effective_speed = base_speed * (1 - (traffic_intensity / 100))
+    st.caption(f"ℹ️ Effective Average Speed considering traffic: **{effective_speed:.1f} km/h**")
+
+    # SAFE ZONES
     city_zones = {
         "Milan (Inland)":   {'center': (45.4642, 9.1900),  'bounds': [45.40, 45.55, 9.10, 9.30]},
-        "Naples (Coastal)": {'center': (40.8518, 14.2681), 'bounds': [40.86, 40.95, 14.20, 14.35]}, # Shifted North to avoid Bay
+        "Naples (Coastal)": {'center': (40.8518, 14.2681), 'bounds': [40.86, 40.95, 14.20, 14.35]},
         "Rome (Central)":   {'center': (41.9028, 12.4964), 'bounds': [41.80, 42.00, 12.40, 12.60]}
     }
-    
     selected_zone = city_zones[depot_city]
     depot_lat, depot_lon = selected_zone['center']
 
-    if 'vrp_data_v4' not in st.session_state:
-        st.session_state.vrp_data_v4 = None
+    # Initialize Session State
+    if 'vrp_data_v5' not in st.session_state:
+        st.session_state.vrp_data_v5 = None
 
-    if st.button("🚀 Generate Scenario & Optimize"):
+    # --- BUTTON: GENERATE GEOMETRY ONLY ---
+    if st.button("🚀 Generate Scenario & Solve Routes"):
         
-        # 1. GENERATE SMART DATA (Within Safe Bounds)
-        locations = [{'id': 0, 'lat': depot_lat, 'lon': depot_lon, 'name': 'Central Depot', 'demand': 0}]
+        # 1. GENERATE POINTS
+        locations = [{'id': 0, 'lat': depot_lat, 'lon': depot_lon, 'name': 'Central Depot'}]
         bounds = selected_zone['bounds']
-        
         for i in range(num_locations):
-            # Random points ONLY within safe land box
             lat = random.uniform(bounds[0], bounds[1])
             lon = random.uniform(bounds[2], bounds[3])
-            locations.append({
-                'id': i+1, 
-                'lat': lat, 
-                'lon': lon, 
-                'name': f'Store #{i+1}', 
-                'demand': random.randint(1, 10)
-            })
+            locations.append({'id': i+1, 'lat': lat, 'lon': lon, 'name': f'Store #{i+1}'})
         
-        # 2. DISTANCE MATRIX
+        # 2. MATRIX & SOLVER
         dist_matrix = {}
         for i in range(len(locations)):
             dist_matrix[i] = {}
             for j in range(len(locations)):
                 dist = haversine(locations[i]['lon'], locations[i]['lat'], 
                                  locations[j]['lon'], locations[j]['lat'])
-                dist_matrix[i][j] = int(dist * 1000) # Meters
+                dist_matrix[i][j] = int(dist * 1000)
 
-        # 3. OR-TOOLS SETUP
         manager = pywrapcp.RoutingIndexManager(len(locations), num_vehicles, 0)
         routing = pywrapcp.RoutingModel(manager)
 
@@ -122,126 +121,108 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
 
         transit_callback_index = routing.RegisterTransitCallback(distance_callback)
         routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-
-        # Constraint: Max distance per vehicle (Force split)
-        dimension_name = 'Distance'
-        routing.AddDimension(transit_callback_index, 0, 300000, True, dimension_name)
-        distance_dimension = routing.GetDimensionOrDie(dimension_name)
-        distance_dimension.SetGlobalSpanCostCoefficient(100)
-
-        # 4. SOLVE
+        
+        routing.AddDimension(transit_callback_index, 0, 300000, True, 'Distance')
+        
         search_parameters = pywrapcp.DefaultRoutingSearchParameters()
         search_parameters.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
         solution = routing.SolveWithParameters(search_parameters)
 
         if solution:
-            routes_data = []
-            colors = ['#FF0000', '#0000FF', '#008000', '#FFA500', '#800080'] # Red, Blue, Green, Orange, Purple
+            # SAVE RAW GEOMETRY DATA ONLY (Distances, not Times)
+            raw_routes = []
+            colors = ['red', 'blue', 'green', 'orange', 'purple']
             
             for vehicle_id in range(num_vehicles):
                 index = routing.Start(vehicle_id)
-                route_coords = []
-                route_details = []
-                total_dist_m = 0
-                
-                start_time = datetime.datetime.now().replace(hour=8, minute=0, second=0) # Starts at 8:00 AM
+                route_legs = [] # Store individual legs to recalc time later
                 
                 while not routing.IsEnd(index):
                     node_index = manager.IndexToNode(index)
-                    loc = locations[node_index]
-                    route_coords.append([loc['lat'], loc['lon']])
+                    start_loc = locations[node_index]
                     
-                    # Calculate Time
                     previous_index = index
                     index = solution.Value(routing.NextVar(index))
+                    next_node_index = manager.IndexToNode(index)
+                    end_loc = locations[next_node_index]
                     
-                    if not routing.IsEnd(index):
-                        dist_m = dist_matrix[node_index][manager.IndexToNode(index)]
-                        total_dist_m += dist_m
-                        travel_time_min = (dist_m / 1000) / avg_speed * 60
-                        arrival_time = start_time + datetime.timedelta(minutes=travel_time_min + (15 * len(route_details))) # +15 min service time
-                        
-                        route_details.append({
-                            "name": loc['name'],
-                            "eta": arrival_time.strftime("%H:%M"),
-                            "dist_leg": dist_m / 1000
-                        })
-
-                # Close loop
-                node_index = manager.IndexToNode(index)
-                loc = locations[node_index]
-                route_coords.append([loc['lat'], loc['lon']])
+                    dist_m = dist_matrix[node_index][next_node_index]
+                    
+                    route_legs.append({
+                        "start_coords": [start_loc['lat'], start_loc['lon']],
+                        "end_coords": [end_loc['lat'], end_loc['lon']],
+                        "end_name": end_loc['name'],
+                        "dist_m": dist_m
+                    })
                 
-                if len(route_coords) > 2:
-                    routes_data.append({
+                if len(route_legs) > 0:
+                    raw_routes.append({
                         "vehicle_id": vehicle_id + 1,
                         "color": colors[vehicle_id % len(colors)],
-                        "coords": route_coords,
-                        "total_dist_km": total_dist_m / 1000,
-                        "total_time_h": (total_dist_m / 1000) / avg_speed,
-                        "stops": route_details
+                        "legs": route_legs
                     })
             
-            st.session_state.vrp_data_v4 = {"center": [depot_lat, depot_lon], "routes": routes_data, "locations": locations}
+            st.session_state.vrp_data_v5 = {"center": [depot_lat, depot_lon], "raw_routes": raw_routes}
         else:
-            st.error("Optimization Failed. Try fewer stops.")
+            st.error("Optimization Failed. Try again.")
 
-    # RENDER MAP
-    if st.session_state.vrp_data_v4:
-        data = st.session_state.vrp_data_v4
-        m2 = folium.Map(location=data["center"], zoom_start=11) # Clean map style
+    # --- DYNAMIC RENDERER (Runs on every interaction) ---
+    if st.session_state.vrp_data_v5:
+        data = st.session_state.vrp_data_v5
+        m2 = folium.Map(location=data["center"], zoom_start=11)
         
-        total_km_fleet = 0
+        total_fleet_km = 0
+        total_fleet_hours = 0
         
-        for route in data["routes"]:
-            total_km_fleet += route['total_dist_km']
+        # Recalculate Times based on CURRENT Effective Speed
+        current_time_base = datetime.datetime.now().replace(hour=8, minute=0, second=0)
+        
+        for route in data["raw_routes"]:
+            vehicle_time = current_time_base
+            route_coords = [[data["center"][0], data["center"][1]]] # Start at depot
+            route_km = 0
             
-            # 1. ANIMATED PATH (AntPath) - Shows Direction
-            plugins.AntPath(
-                locations=route["coords"],
-                color=route["color"],
-                weight=5,
-                opacity=0.8,
-                delay=1000, # Animation speed
-                tooltip=f"Vehicle {route['vehicle_id']} | {route['total_dist_km']:.1f} km"
-            ).add_to(m2)
+            # Draw Route & Markers
+            for leg in route["legs"]:
+                # Logic: Time = Distance / Speed
+                travel_min = (leg["dist_m"] / 1000) / max(effective_speed, 1) * 60 # Avoid div by zero
+                service_min = 15 # Fixed service time
+                
+                vehicle_time += datetime.timedelta(minutes=travel_min + service_min)
+                eta_str = vehicle_time.strftime("%H:%M")
+                
+                route_coords.append(leg["end_coords"])
+                route_km += leg["dist_m"] / 1000
+                
+                # Add Marker with DYNAMIC ETA
+                if "Depot" not in leg["end_name"]:
+                    folium.CircleMarker(
+                        leg["end_coords"],
+                        radius=6,
+                        color=route["color"],
+                        fill=True,
+                        fill_opacity=1,
+                        popup=f"<b>{leg['end_name']}</b><br>ETA: {eta_str}<br>Dist: {leg['dist_m']/1000:.1f}km",
+                        tooltip=f"{leg['end_name']} (ETA: {eta_str})"
+                    ).add_to(m2)
             
-            # 2. MARKERS with Stop Numbers
-            for i, (lat, lon) in enumerate(route["coords"][:-1]):
-                is_depot = (i == 0)
-                icon_color = 'black' if is_depot else route["color"]
-                icon_type = 'home' if is_depot else 'circle'
-                
-                # Dynamic Popup Content
-                if is_depot:
-                    popup_html = "<b>🏭 DEPOT</b><br>Start: 08:00 AM"
-                else:
-                    stop_info = route["stops"][i-1] # i-1 because 0 is depot
-                    popup_html = f"""
-                    <b>{stop_info['name']}</b><br>
-                    🚚 Vehicle: {route['vehicle_id']}<br>
-                    🕒 ETA: {stop_info['eta']}<br>
-                    📦 Service: 15 min
-                    """
-                
-                folium.Marker(
-                    [lat, lon],
-                    popup=folium.Popup(popup_html, max_width=200),
-                    icon=folium.Icon(color=icon_color, icon=icon_type, prefix='fa')
-                ).add_to(m2)
+            # Draw Lines
+            folium.PolyLine(route_coords, color=route["color"], weight=4, opacity=0.8).add_to(m2)
+            plugins.AntPath(route_coords, color=route["color"], weight=4, delay=800, opacity=0).add_to(m2) # Invisible antpath for flow
+            
+            # Stats per vehicle
+            total_fleet_km += route_km
+            total_fleet_hours += (vehicle_time - current_time_base).total_seconds() / 3600
+
+        # Add Depot Marker
+        folium.Marker(data["center"], popup="DEPOT (Start 08:00)", icon=folium.Icon(color='black', icon='home')).add_to(m2)
 
         st_folium(m2, width=1000, height=600)
 
-        # --- KPI DASHBOARD ---
-        st.markdown("### 📈 Fleet Performance Metrics")
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("Total Fleet Distance", f"{total_km_fleet:.1f} km")
-        kpi2.metric("Active Vehicles", len(data["routes"]))
-        kpi3.metric("Est. Fuel Cost", f"€ {total_km_fleet * 0.15:.2f}") # Approx fuel cost
-
-        # --- DETAILED ITINERARY TABLE ---
-        st.markdown("### 📋 Detailed Itinerary")
-        for route in data["routes"]:
-            with st.expander(f"🚛 Vehicle {route['vehicle_id']} Itinerary ({route['total_dist_km']:.1f} km)"):
-                st.write(f"**Total Drive Time:** {route['total_time_h']:.1f} hours")
-                st.dataframe(pd.DataFrame(route['stops']))
+        # Dynamic KPIs
+        st.markdown("### 🚦 Live Operations Metrics")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Effective Speed", f"{effective_speed:.1f} km/h", delta=f"-{traffic_intensity}% Traffic")
+        k2.metric("Total Distance", f"{total_fleet_km:.1f} km")
+        k3.metric("Total Time (Fleet)", f"{total_fleet_hours:.1f} hrs")
+        k4.metric("Est. Cost", f"€ {total_fleet_km * 0.85:.0f}")
