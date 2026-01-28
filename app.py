@@ -79,11 +79,20 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
     coords = {"Rome": (41.9028, 12.4964), "Milan": (45.4642, 9.1900), "Naples": (40.8518, 14.2681)}
     depot_lat, depot_lon = coords[depot_city]
 
-    # Generate Random Deliveries around Depot
+    # Initialize Session State
+    if 'optimization_run' not in st.session_state:
+        st.session_state.optimization_run = False
+
     if st.button("🚀 Run AI Optimization"):
+        st.session_state.optimization_run = True
+
+    # Run Logic if State is True
+    if st.session_state.optimization_run:
         locations = [{'id': 0, 'lat': depot_lat, 'lon': depot_lon, 'name': 'Depot'}]
+        # Use a fixed seed so points don't jump around on refresh
+        random.seed(42) 
+        
         for i in range(num_locations):
-            # Random points within ~100km
             lat = depot_lat + random.uniform(-1, 1)
             lon = depot_lon + random.uniform(-1, 1)
             locations.append({'id': i+1, 'lat': lat, 'lon': lon, 'name': f'Customer {i+1}'})
@@ -95,7 +104,7 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
             for j in range(len(locations)):
                 dist = haversine(locations[i]['lon'], locations[i]['lat'], 
                                  locations[j]['lon'], locations[j]['lat'])
-                dist_matrix[i][j] = int(dist * 1000) # Convert to meters for OR-Tools
+                dist_matrix[i][j] = int(dist * 1000)
 
         # OR-Tools Setup
         manager = pywrapcp.RoutingIndexManager(len(locations), num_vehicles, 0)
@@ -121,12 +130,9 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
             
             colors = ['blue', 'green', 'orange', 'purple', 'red']
             
-            # Draw Routes
-            total_dist_all = 0
             for vehicle_id in range(num_vehicles):
                 index = routing.Start(vehicle_id)
                 route_coords = []
-                route_load = 0
                 route_text = f"<b>Vehicle {vehicle_id+1}:</b> Depot"
                 
                 while not routing.IsEnd(index):
@@ -139,19 +145,16 @@ elif mode == "🚚 AI Route Optimizer (VRP)":
                     previous_index = index
                     index = solution.Value(routing.NextVar(index))
                     
-                    # Add simple marker
                     if node_index == 0:
                         folium.Marker([lat, lon], popup="DEPOT", icon=folium.Icon(color='black', icon='home')).add_to(m2)
                     else:
-                        folium.CircleMarker([lat, lon], radius=5, color=colors[vehicle_id], fill=True).add_to(m2)
+                        folium.CircleMarker([lat, lon], radius=5, color=colors[vehicle_id%5], fill=True).add_to(m2)
 
-                # Close the loop
                 node_index = manager.IndexToNode(index)
                 route_coords.append((locations[node_index]['lat'], locations[node_index]['lon']))
                 route_text += " ➝ Depot"
                 
-                # Plot Path
-                folium.PolyLine(route_coords, color=colors[vehicle_id], weight=3, opacity=0.8, tooltip=f"Vehicle {vehicle_id+1}").add_to(m2)
+                folium.PolyLine(route_coords, color=colors[vehicle_id%5], weight=3, opacity=0.8, tooltip=f"Vehicle {vehicle_id+1}").add_to(m2)
                 st.caption(route_text)
 
             st_folium(m2, width=800, height=500)
